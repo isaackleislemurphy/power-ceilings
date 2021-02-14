@@ -195,6 +195,9 @@ main <- function(){
               by=c("mlb_id")) %>% 
     left_join(., hr_counts, by=c("mlb_id", "season")) %>%
     ungroup()
+  
+  # Piecewise Frontiers -----------------------------------------------------
+  plot_frontiers_piecewise(master_df)
 
   # Train + Test ------------------------------------------------------------
   # quick comparison of Binomial vs. Poisson: train set is 2016-17; dev set is 2018
