@@ -14,6 +14,7 @@ Q = .975
 NSAMP = 10000
 BAM_LU_FILEPATH = "~/Downloads/master.csv"
 
+
 get_exit_data <- function(min_season=2016, max_season=2020){
   #' Wrapper around Bill Petti's package to get tracking data over course of season(s)
   #' If a particular date throws an error within baseballr, the loop simply moves onto the next date
@@ -31,6 +32,7 @@ get_exit_data <- function(min_season=2016, max_season=2020){
     mutate(season = lubridate::year(game_date))
 }
 
+
 collapse_hr_counts <- function(exit_data_df){
   #' Computes hr, pa, and hr/pa for a player in a season
   #' @param exit_data_df : data.frame. A dataframe output of `get_exit_data()`
@@ -42,6 +44,7 @@ collapse_hr_counts <- function(exit_data_df){
     summarise(pa = n(), hr = sum(events == 'home_run'), hr_pct = mean(events == 'home_run'))%>%
     rename(mlb_id = batter)
 }
+
 
 collapse_exit_data <- function(exit_data_df, n=50){
   #' Extracts each player's max-ev in a given season, and filters players with insufficent tracked batted balls
@@ -68,6 +71,7 @@ collapse_exit_data <- function(exit_data_df, n=50){
   result
   
 }
+
 
 find_frontier_piecewise <- function(df, yvar='hr'){
   #' Finds a homerun frontier for a given exit velocity via a coarse search
@@ -124,9 +128,12 @@ plot_frontiers_piecewise <- function(master_df){
   list(plt_hr_pct, plt_hr)
 }
 
+# helper
+# log_factorial <- function(x){if(x == 0){return(0)}else{return(sum(log(1:x)))}}
 
 compare_models <- function(df, seas_cut=2019){
   #' Performs a quick holdout CV (no tuning/regularization) due to simplicity of the model, to compare binomial vs. Poisson. 
+  #' Note the "Poisson" involves us using the per/PA arrival average as a probability
   #' Function is largely a sanity check. 
   #' @param df : data.frame. A dataframe with train and devset, s.t. one can call glm() on this df
   #' @param seas_cut : int. Season to cut dev set on. Cut is \leq. 
@@ -142,12 +149,16 @@ compare_models <- function(df, seas_cut=2019){
     glm_pois = glm(hr ~ ns(ev_max, df=grd[ii, 1]) + season + offset(log(pa)), df_train, family='poisson')
     
     pi_hat_binom = predict(glm_binom, newdata=df_test %>% mutate(season=seas_cut), type='response')
-    pi_hat_pois = predict(glm_pois, newdata=df_test %>% mutate(season=seas_cut), type='response')/df_test$pa
+    lambda_hat_pois = predict(glm_pois, newdata=df_test %>% mutate(season=seas_cut), type='response')
+    pi_hat_pois = lambda_hat_pois/df_test$pa
     
-    nll_binom = -sum(df_test$hr * log(pi_hat_binom) - (df_test$pa - df_test$hr) * log(1 - pi_hat_binom))/sum(df_test$pa);
-    nll_pois = -sum(df_test$hr * log(pi_hat_pois) - (df_test$pa - df_test$hr) * log(1 - pi_hat_pois))/sum(df_test$pa);
     
-    holdout_result[[ii]] = c(nll_binom, nll_pois)
+    nll_binom = -sum(sapply(1:nrow(df_test), function(i) dbinom(df_test$hr[i], df_test$pa[i], pi_hat_binom[i], log=T)))
+    nll_pois_approx = -sum(sapply(1:nrow(df_test), function(i) dbinom(df_test$hr[i], df_test$pa[i], pi_hat_pois[i], log=T)))
+    # nll_pois_true = -(sum(df_test$hr * log(lambda_hat_pois)) - sum(sapply(df_test$hr, log_factorial)) - sum(lambda_hat_pois))
+    nll_pois_true = -sum(sapply(1:nrow(df_test), function(i) dpois(df_test$hr[i], lambda_hat_pois[i], log=T)))
+    
+    holdout_result[[ii]] = c(nll_binom, nll_pois_approx, nll_pois_true)
   }
   do.call("rbind", holdout_result) %>%
     cbind(., grd)
@@ -178,6 +189,7 @@ plot_hr_ceiling <- function(mod, PA=600, season=2019){
   plt
 }
 
+                                
 main <- function(){
   
   # Ingest --------------------------------------------------------------------
@@ -195,7 +207,7 @@ main <- function(){
               by=c("mlb_id")) %>% 
     left_join(., hr_counts, by=c("mlb_id", "season")) %>%
     ungroup()
-  
+
   # Piecewise Frontiers -----------------------------------------------------
   plot_frontiers_piecewise(master_df)
 
@@ -204,12 +216,14 @@ main <- function(){
   nll_comp = compare_models(master_df, 2018)
   cat('Binomial Best tune:\n\t')
   print(nll_comp[which.min(nll_comp[, 1]), ])
-  cat('Poisson Best tune:\n\t')
+  cat('Poisson (Binomial-ish) Best tune:\n\t')
   print(nll_comp[which.min(nll_comp[, 2]), ])
+  cat('Poisson Best tune:\n\t')
+  print(nll_comp[which.min(nll_comp[, 3]), ])
   
   # train + test: train on 2016-2019, test on 2020
   df_train = master_df %>% filter(season <= 2019); df_test = master_df %>% filter(season == 2020)
-  mod_test = glm(hr ~ ns(ev_max, 2) + season + offset(log(pa)), df_train, family='poisson') # see tune from above
+  mod_test = glm(hr ~ ns(ev_max, 3) + season + offset(log(pa)), df_train, family='poisson') # see tune from above
   plot_hr_ceiling(mod_test, PA=600, season=2019)
   
   # again -- this is just an approximate prediction interval. NOT RIGOROUS. 
@@ -240,17 +254,17 @@ main <- function(){
       as.numeric()
   ) 
   
-  # actual (mean) predictions
+  # actual predictions
   yhat = predict(mod_test, newdata=df_test, type='response')
   pi_hat = yhat/df_test$pa
-  # store sampled quantiles
+  # method 1: eval PPP CDF @ .975
   df_test$q_pois = yhat_pois_upr; df_test$q_binom = yhat_binom_upr
   # method 1 capture rate:
   cat('Method 1 (direct Poisson CDF) capture rate: \n\t-', mean(df_test$q_pois > df_test$hr))
   cat('Method 2 (~ binomial) capture rate: \n\t-', mean(df_test$q_binom > df_test$hr))
   
   # Full Model --------------------------------------------------------------
-  mod = glm(hr ~ ns(ev_max, 2) + season + offset(log(pa)), master_df, family='poisson')
+  mod = glm(hr ~ ns(ev_max, 3) + season + offset(log(pa)), master_df, family='poisson')
   plot_hr_ceiling(mod)
   
 }
